@@ -6,6 +6,8 @@ __pycache__
 .pytest_cache
 .venv
 tests
+# 评测脚本、历史输出和源码快照只用于开发与复现。
+eval
 *.log
 Dockerfile
 .dockerignore

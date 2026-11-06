@@ -21,20 +21,13 @@ class CodeEnum(IntEnum):  # 使用IntEnum确保枚举值是整数
     RATE_LIMITED = 701       # 限流
 
 
+class BaseResult(BaseModel, Generic[T]):
+    """非流式 API 的统一响应，前端按 code 判断结果并读取 msg/data。
 
-"""
-如果没有BaseResult，返回的都是{"name": "Alice", ...},{"error": "用户不存在"},
-前端拿到响应后，根本不知道这是成功还是失败
-而定义BaseResult后，返回的数据是
-{
-    "code": 200,                      # 业务状态码
-    "msg": "success",                 # 给前端看的提示信息
-    "data": {"name": "Alice", ...}    # 真正的业务数据
-}
-"""
+    成功响应的 code 为 200，失败响应的 data 为 None。
+    此结构是当前前后端接口契约，由 Pydantic 校验并生成 OpenAPI 模型。
+    """
 
-
-class BaseResult(BaseModel, Generic[T]):  
     code: int = CodeEnum.SUCCESS
     msg: str = "success"
     data: T | None = None

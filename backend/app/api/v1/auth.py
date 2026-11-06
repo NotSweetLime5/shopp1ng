@@ -25,7 +25,7 @@ UserOut.model_validate(user)的输出是
 UserOut(id=42, username="alice", email="a@b.com")
 
 BaseResult.ok输出是
-BaseResult(code=0, message="ok", data=UserOut(...))
+BaseResult(code=200, msg="success", data=UserOut(...))
 
 """
 @router.post("/register", response_model=BaseResult[UserOut])
@@ -39,7 +39,7 @@ async def register(request: Request, data: UserRegister, db: AsyncSession = Depe
 async def login(request: Request, data: UserLogin, db: AsyncSession = Depends(get_db)):
     await _guard("login", request, settings.login_rate_limit)
     user = await user_service.authenticate(db, data.username, data.password)
-    return BaseResult.ok(                                  # 组装为BaseResult(code=0, message="ok", data=TokenOut(...))    
+    return BaseResult.ok(                                  # 组装为 BaseResult(code=200, msg="success", data=TokenOut(...))
         TokenOut(                                          # 组装为TokenOut(access_token="eyJ...", expires_in=1800, user=UserOut(...))
             access_token=create_access_token(user.id),     #使用user.id创建JWT
             expires_in=settings.jwt_expire_minutes * 60,   # 返回剩余秒数，不返回绝对时刻
