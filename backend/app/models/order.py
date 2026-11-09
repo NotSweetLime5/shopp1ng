@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Numeric, String
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Numeric, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,11 +10,18 @@ from app.models.base import Base, IdMixin, TimestampMixin
 
 class Order(Base, IdMixin, TimestampMixin):
        __tablename__ = "orders"
+       __table_args__ = (
+              Index(
+                     "uq_orders_user_idempotency_key", "user_id", "idempotency_key",
+                     unique=True, postgresql_where=text("idempotency_key IS NOT NULL"),
+              ),
+       )
 
        order_no: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
        user_id: Mapped[int] = mapped_column(
               BigInteger, ForeignKey("users.id"), nullable=False, index=True
        )
+       idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
        # 1 未付款 2 已付款待发货 3 已发货 4 已收货 5 交易完成 6 已退款 7 已关闭
        status: Mapped[int] = mapped_column(nullable=False, default=1, index=True)
        total_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
@@ -23,6 +30,8 @@ class Order(Base, IdMixin, TimestampMixin):
        receiver_address: Mapped[str] = mapped_column(String(255), nullable=False)
        pay_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
        consign_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+       carrier: Mapped[str | None] = mapped_column(String(60), nullable=True)
+       tracking_no: Mapped[str | None] = mapped_column(String(64), nullable=True)
        confirm_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
        finish_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
        close_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

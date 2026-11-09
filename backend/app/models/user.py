@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, ForeignKey, Index, String, text
+from sqlalchemy import BigInteger, ForeignKey, Index, String, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base, IdMixin, TimestampMixin
 
@@ -15,6 +15,7 @@ class User(Base, IdMixin, TimestampMixin):
        head_pic: Mapped[str | None] = mapped_column(String(255))
        sex: Mapped[str | None] = mapped_column(String(10))
        is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
+       can_ship_orders: Mapped[bool] = mapped_column(default=False, server_default=false(), nullable=False)
     
     
 class Address(Base, IdMixin, TimestampMixin):

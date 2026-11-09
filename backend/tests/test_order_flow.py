@@ -9,9 +9,15 @@ import random
 import uuid
 
 from conftest import count, first_goods_id, get_stock, make_client, run, set_stock
+from sqlalchemy import update
 
+from app.api.v1 import orders as order_routes
+from app.core.database import AsyncSessionLocal
+from app.core.exceptions import BusException
+from app.core.result import CodeEnum
 from app.models.cart import CartItem
 from app.models.order import Order, OrderItem
+from app.models.user import User
 
 
 def _u(tag):
@@ -219,6 +225,141 @@ def test_idempotency_key_replays_same_order():
             assert await count(Order, Order.user_id == uid) == 1, "新 body 被当成新订单执行了"
             left = (await c.get("/api/v1/cart", headers=H)).json()["data"]
             assert cid2 in [x["id"] for x in left], "重放请求把未结算的购物车行清掉了"
+    run(main())
+
+
+def test_concurrent_idempotent_orders_commit_once():
+    async def main():
+        gid = await first_goods_id()
+        await set_stock(gid, 40)
+        async with make_client() as c:
+            tok, uid = await _signup(c, "idem_race")
+            headers = {"Authorization": f"Bearer {tok}", "Idempotency-Key": uuid.uuid4().hex}
+            aid = await _address(c, tok)
+            cart = await c.post("/api/v1/cart", headers=headers, json={"goods_id": gid, "quantity": 2})
+            assert cart.status_code == 200, cart.text
+            body = {"cart_item_ids": [cart.json()["data"][0]["id"]], "address_id": aid}
+
+            replies = await asyncio.gather(*(
+                c.post("/api/v1/orders", headers=headers, json=body) for _ in range(6)
+            ))
+            assert all(r.status_code == 200 for r in replies), [r.text for r in replies]
+            assert len({r.json()["data"]["id"] for r in replies}) == 1
+            assert await count(Order, Order.user_id == uid) == 1
+            assert await get_stock(gid) == 38
+    run(main())
+
+
+def test_idempotency_key_can_retry_after_order_transaction_rolls_back(monkeypatch):
+    async def main():
+        gid = await first_goods_id()
+        await set_stock(gid, 40)
+        async with make_client() as c:
+            tok, uid = await _signup(c, "idem_rollback")
+            headers = {"Authorization": f"Bearer {tok}", "Idempotency-Key": uuid.uuid4().hex}
+            aid = await _address(c, tok)
+            cart = await c.post("/api/v1/cart", headers=headers, json={"goods_id": gid, "quantity": 2})
+            assert cart.status_code == 200, cart.text
+            cid = cart.json()["data"][0]["id"]
+            body = {"cart_item_ids": [cid], "address_id": aid}
+
+            async def fail_before_commit(*args):
+                raise BusException(CodeEnum.SERVER_ERROR, "模拟订单已写入但事务未提交")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(order_routes, "_detail", fail_before_commit)
+                failed = await c.post("/api/v1/orders", headers=headers, json=body)
+            assert failed.status_code == 500, failed.text
+            assert await count(Order, Order.user_id == uid) == 0
+            assert await count(CartItem, CartItem.id == cid) == 1
+            assert await get_stock(gid) == 40
+
+            retried = await c.post("/api/v1/orders", headers=headers, json=body)
+            assert retried.status_code == 200, retried.text
+            assert await count(Order, Order.user_id == uid) == 1
+            assert await get_stock(gid) == 38
+    run(main())
+
+
+def test_checkout_cannot_consume_same_cart_with_different_keys():
+    async def main():
+        gid = await first_goods_id()
+        await set_stock(gid, 40)
+        async with make_client() as c:
+            tok, uid = await _signup(c, "cart_race")
+            headers = {"Authorization": f"Bearer {tok}"}
+            aid = await _address(c, tok)
+            cart = await c.post("/api/v1/cart", headers=headers, json={"goods_id": gid, "quantity": 2})
+            assert cart.status_code == 200, cart.text
+            body = {"cart_item_ids": [cart.json()["data"][0]["id"]], "address_id": aid}
+            replies = await asyncio.gather(*(
+                c.post("/api/v1/orders", headers={**headers, "Idempotency-Key": uuid.uuid4().hex}, json=body)
+                for _ in range(2)
+            ))
+            assert sorted(r.status_code for r in replies) == [200, 400], [r.text for r in replies]
+            assert await count(Order, Order.user_id == uid) == 1
+            assert await get_stock(gid) == 38
+    run(main())
+
+
+def test_fulfillment_permissions_and_atomic_transitions():
+    async def main():
+        gid = await first_goods_id()
+        await set_stock(gid, 40)
+        queue = "/api/v1/fulfillment/orders"
+        async with make_client() as c:
+            buyer, _ = await _signup(c, "fulfill_buyer")
+            operator, operator_id = await _signup(c, "fulfill_staff")
+            buyer_headers = {"Authorization": f"Bearer {buyer}"}
+            staff_headers = {"Authorization": f"Bearer {operator}"}
+            assert (await c.get(queue)).status_code == 401
+            assert (await c.get(queue, headers=buyer_headers)).status_code == 403
+            async with AsyncSessionLocal() as db:
+                await db.execute(update(User).where(User.id == operator_id).values(can_ship_orders=True))
+                await db.commit()
+
+            aid = await _address(c, buyer)
+            cart = await c.post("/api/v1/cart", headers=buyer_headers, json={"goods_id": gid, "quantity": 2})
+            assert cart.status_code == 200, cart.text
+            created = await c.post("/api/v1/orders", headers=buyer_headers, json={
+                "cart_item_ids": [cart.json()["data"][0]["id"]], "address_id": aid,
+            })
+            assert created.status_code == 200, created.text
+            oid = created.json()["data"]["id"]
+            order_url = f"/api/v1/orders/{oid}"
+            ship_url = f"{queue}/{oid}/ship"
+            confirm_url = f"{order_url}/confirm-receipt"
+            shipment = {"carrier": "演示物流", "tracking_no": "DEMO-1001"}
+            assert (await c.post(ship_url, headers=buyer_headers, json=shipment)).status_code == 403
+            assert (await c.post(ship_url, headers=staff_headers, json=shipment)).status_code == 409
+            assert (await c.post(confirm_url, headers=buyer_headers)).status_code == 409
+
+            assert (await c.post(f"{order_url}/pay", headers=buyer_headers)).status_code == 200
+            pending = await c.get(queue, headers=staff_headers)
+            assert pending.status_code == 200, pending.text
+            assert oid in {row["id"] for row in pending.json()["data"]["items"]}
+            invalid = await c.post(ship_url, headers=staff_headers, json={**shipment, "tracking_no": " "})
+            assert invalid.status_code == 400, invalid.text
+            ships = await asyncio.gather(
+                c.post(ship_url, headers=staff_headers, json=shipment),
+                c.post(ship_url, headers=staff_headers, json={**shipment, "tracking_no": "DEMO-1002"}),
+            )
+            assert sorted(r.status_code for r in ships) == [200, 409], [r.text for r in ships]
+            shipped = next(r.json()["data"] for r in ships if r.status_code == 200)
+            assert shipped["status"] == 3 and shipped["consign_time"]
+            detail = (await c.get(order_url, headers=buyer_headers)).json()["data"]
+            assert detail["tracking_no"] == shipped["tracking_no"]
+            pending = (await c.get(queue, headers=staff_headers)).json()["data"]["items"]
+            assert oid not in {row["id"] for row in pending}
+
+            assert (await c.post(confirm_url, headers=staff_headers)).status_code == 404
+            confirmations = await asyncio.gather(*(
+                c.post(confirm_url, headers=buyer_headers) for _ in range(2)
+            ))
+            assert sorted(r.status_code for r in confirmations) == [200, 409]
+            done = (await c.get(order_url, headers=buyer_headers)).json()["data"]
+            assert done["status"] == 5 and done["confirm_time"] and done["confirm_time"] == done["finish_time"]
+            assert await get_stock(gid) == 38
     run(main())
 
 

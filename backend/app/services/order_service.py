@@ -2,7 +2,7 @@ import random
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -13,13 +13,15 @@ from app.models.cart import CartItem
 from app.models.goods import Goods
 from app.models.order import Order, OrderItem
 from app.models.user import Address, User
-from app.schemas.order import OrderCreate
+from app.schemas.order import OrderCreate, OrderShipment
 from app.services.ownership import get_owned
 
 settings = get_settings()
 
 STATUS_UNPAID = 1
 STATUS_PAID = 2
+STATUS_SHIPPED = 3
+STATUS_COMPLETED = 5
 STATUS_CLOSED = 7
 
 
@@ -38,14 +40,28 @@ def generate_order_no() -> str:
     return f"{_now():%Y%m%d%H%M%S}{random.randint(0, 999_999):06d}"
 
 
-async def create_order(db: AsyncSession, user: User, data: OrderCreate) -> Order:
+async def find_order_for_retry(db: AsyncSession, user_id: int, key: str) -> int | None:
+    """串行处理同一用户的同一幂等键，锁在事务提交或回滚时释放。"""
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+        {"lock_key": f"order:{user_id}:{key}"},
+    )
+    # 单独查询可在 PostgreSQL 的 READ COMMITTED 下看见前一个事务刚提交的订单。
+    return await db.scalar(
+        select(Order.id).where(Order.user_id == user_id, Order.idempotency_key == key)
+    )
+
+
+async def create_order(
+    db: AsyncSession, user: User, data: OrderCreate, *, idempotency_key: str | None = None
+) -> Order:
     
     
     # 判断地址是否存在且属于用户
     address = await get_owned(db, Address, data.address_id, user.id, "地址不存在")
     
     
-    # 根据前端传入的cart_item_ids，从数据库中查询对应的购物车条目
+    # 锁住待结算的购物车条目，避免两个不同幂等键同时消费同一批条目。
     # ORDER BY goods_id 是给下面的扣库存循环定的**加锁顺序**：两个事务若按不同顺序
     # 锁同一批 goods 行（A 拿 80→87、B 拿 87→80），PG 会判死锁并回滚其中一个 → 500。
     # 全项目按 goods_id 升序拿行锁，环就无法形成。改这里顺序前先看 _restore_stock。
@@ -56,6 +72,7 @@ async def create_order(db: AsyncSession, user: User, data: OrderCreate) -> Order
                 CartItem.user_id == user.id, CartItem.id.in_(data.cart_item_ids)
             )
             .order_by(CartItem.goods_id)
+            .with_for_update()
         )
     )
     
@@ -112,6 +129,7 @@ async def create_order(db: AsyncSession, user: User, data: OrderCreate) -> Order
     order = Order(
         order_no=generate_order_no(),
         user_id=user.id,
+        idempotency_key=idempotency_key,
         # 未支付
         status=STATUS_UNPAID,
         total_price=total,
@@ -208,6 +226,47 @@ async def cancel_order(db: AsyncSession, user_id: int, order_id: int) -> Order:
     await _restore_stock(db, order.id)
     await db.refresh(order)
     return order
+
+
+async def list_pending_shipments(db: AsyncSession, *, page: int, size: int) -> tuple[list[Order], int]:
+    pending = (Order.status == STATUS_PAID, Order.deleted_at.is_(None))
+    total = await db.scalar(select(func.count()).select_from(Order).where(*pending))
+    rows = await db.scalars(
+        select(Order).where(*pending).order_by(Order.id).offset((page - 1) * size).limit(size)
+    )
+    return list(rows), total or 0
+
+
+async def ship_order(db: AsyncSession, order_id: int, shipment: OrderShipment) -> Order:
+    visible = (Order.id == order_id, Order.deleted_at.is_(None))
+    order = await db.scalar(
+        update(Order)
+        .where(*visible, Order.status == STATUS_PAID)
+        .values(status=STATUS_SHIPPED, consign_time=_now(), **shipment.model_dump())
+        .returning(Order)
+    )
+    if order is not None:
+        return order
+    if await db.scalar(select(Order.id).where(*visible)) is None:
+        raise BusException(CodeEnum.NOT_FOUND, "订单不存在")
+    raise BusException(CodeEnum.CONFLICT, "只有待发货的订单可以发货")
+
+
+async def confirm_receipt(db: AsyncSession, user_id: int, order_id: int) -> Order:
+    now = _now()
+    order = await db.scalar(
+        update(Order)
+        .where(
+            Order.id == order_id, Order.user_id == user_id,
+            Order.deleted_at.is_(None), Order.status == STATUS_SHIPPED,
+        )
+        .values(status=STATUS_COMPLETED, confirm_time=now, finish_time=now)
+        .returning(Order)
+    )
+    if order is not None:
+        return order
+    await get_owned(db, Order, order_id, user_id, "订单不存在")
+    raise BusException(CodeEnum.CONFLICT, "只有已发货的订单可以确认收货")
 
 
 async def _restore_stock(db: AsyncSession, order_id: int) -> None:

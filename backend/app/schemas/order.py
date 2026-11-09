@@ -1,12 +1,20 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
 class OrderCreate(BaseModel):
     cart_item_ids: list[int] = Field(min_length=1, max_length=50)
     address_id: int
+
+
+class OrderShipment(BaseModel):
+    carrier: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=60)]
+    tracking_no: Annotated[str, StringConstraints(
+        strip_whitespace=True, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*$"
+    )]
 
 
 class OrderItemOut(BaseModel):
@@ -34,6 +42,8 @@ class OrderOut(BaseModel):
     receiver_address: str
     pay_time: datetime | None
     consign_time: datetime | None
+    carrier: str | None = None
+    tracking_no: str | None = None
     confirm_time: datetime | None
     finish_time: datetime | None
     close_time: datetime | None

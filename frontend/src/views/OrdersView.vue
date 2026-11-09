@@ -84,8 +84,16 @@ async function act(o, fn, msg) {
   try {
     const updated = await fn(o.id)
     // 后端返回的是改动后的订单行，就地替换，省一次整表重拉
-    orders.value = orders.value.map((x) => (x.id === updated.id ? updated : x))
-    if (detail.value?.id === updated.id) detail.value = { ...detail.value, ...updated }
+    if (filter.value !== null && filter.value !== updated.status) {
+      orders.value = orders.value.filter((x) => x.id !== updated.id)
+      if (openId.value === updated.id) {
+        openId.value = null
+        detail.value = null
+      }
+    } else {
+      orders.value = orders.value.map((x) => (x.id === updated.id ? updated : x))
+      if (detail.value?.id === updated.id) detail.value = { ...detail.value, ...updated }
+    }
     notice.value = msg
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : '操作失败'
@@ -96,6 +104,7 @@ async function act(o, fn, msg) {
 
 const pay = (o) => act(o, api.payOrder, '支付成功（模拟），状态已变为待发货')
 const cancel = (o) => act(o, api.cancelOrder, '订单已取消，库存已归还')
+const confirm = (o) => act(o, api.confirmReceipt, '已确认收货，交易完成')
 
 function stamp(t) {
   return t ? t.replace('T', ' ').slice(0, 19) : ''
@@ -147,9 +156,16 @@ load()
             </button>
             <button class="ghost sm" :disabled="busyId === o.id" @click="cancel(o)">取消</button>
           </template>
+          <button
+            v-else-if="o.status === 3"
+            class="primary sm"
+            :disabled="busyId !== null"
+            @click="confirm(o)"
+          >确认收货</button>
           <span v-else class="muted small">—</span>
         </div>
       </div>
+      <p v-if="o.tracking_no" class="recv muted small">物流：{{ o.carrier }} {{ o.tracking_no }}</p>
 
       <div class="recv muted small">
         {{ o.receiver_name }} {{ o.receiver_phone }} ｜ {{ o.receiver_address }}
@@ -187,8 +203,7 @@ load()
   </section>
 
   <p class="muted tiny">
-    本项目没有后台发货流程，所以界面上只能走到「已付款待发货」；3、4、5、6 这几个状态需要人工或对接物流后写入，
-    但订单状态机、超时关单和 AI 客服查单对它们的解读都是真实可用的 —— 可以直接问客服「我那单发货了吗」。
+    订单或售后有疑问？<RouterLink to="/chat" class="link">联系在线客服</RouterLink>
   </p>
 </template>
 
@@ -355,5 +370,12 @@ load()
 .ok {
   color: var(--ok);
   font-size: 13px;
+}
+@media (max-width: 600px) {
+  .head { grid-template-columns: 22px minmax(0, 1fr) auto; }
+  .amt { grid-column: 2; text-align: left; }
+  .id b { overflow-wrap: anywhere; }
+  .body { margin-left: 0; }
+  .line { flex-wrap: wrap; }
 }
 </style>

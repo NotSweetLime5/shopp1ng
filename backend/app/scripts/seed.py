@@ -98,17 +98,18 @@ CAT_MAP: dict[str, tuple[str, str, str]] = {
 }
 
 
-async def seed(reset: bool = True) -> None:
+async def seed(reset: bool = True, *, with_embeddings: bool = True) -> None:
     async with AsyncSessionLocal() as db:
         existing = await db.scalar(select(func.count()).select_from(Goods))
         if existing and not reset:
-            print(f"goods 已有 {existing} 行，跳过（要重置用 --reset）")
+            print(f"goods 已有 {existing} 行，跳过初始化")
             return
 
-        print("清空旧数据…")
-        await db.execute(delete(GoodsImage))
-        await db.execute(delete(Goods))
-        await db.execute(delete(Category))
+        if reset:
+            print("清空旧数据…")
+            await db.execute(delete(GoodsImage))
+            await db.execute(delete(Goods))
+            await db.execute(delete(Category))
 
         # 拼出三级类目的去重路径，父先子后插入，好拿到 parent_id
         paths: list[tuple[str, str, str]] = []
@@ -163,9 +164,12 @@ async def seed(reset: bool = True) -> None:
                 }
             )
 
-        t = time.perf_counter()
-        vectors = await embed_many_concurrent([r["embed_text"] for r in rows])
-        print(f"embedding {len(vectors)} 条，耗时 {time.perf_counter() - t:.1f}s")
+        if with_embeddings:
+            t = time.perf_counter()
+            vectors = await embed_many_concurrent([r["embed_text"] for r in rows])
+            print(f"embedding {len(vectors)} 条，耗时 {time.perf_counter() - t:.1f}s")
+        else:
+            vectors = [None] * len(rows)
 
         created: list[Goods] = []
         for r, vec in zip(rows, vectors, strict=True):
@@ -289,7 +293,9 @@ async def seed_sensitive() -> None:
 if __name__ == "__main__":
     import sys
 
-    if "--faqs" in sys.argv:
+    if "--catalog-only" in sys.argv:
+        asyncio.run(seed(reset=False, with_embeddings=False))
+    elif "--faqs" in sys.argv:
         asyncio.run(seed_faqs())
     elif "--sensitive" in sys.argv:
         asyncio.run(seed_sensitive())

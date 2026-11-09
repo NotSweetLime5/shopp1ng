@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ApiError, api } from '../api'
 
@@ -8,11 +8,39 @@ const q = ref('')
 const loading = ref(false)
 const error = ref('')
 const result = ref(null)
-const semantic = ref(true)
+const semantic = ref(false)
+const categories = ref([])
+const category = ref(null)
+const sort = ref('default')
+const catalog = ref(null)
+const catalogLoading = ref(false)
+const catalogError = ref('')
+const visible = computed(() => result.value ?? catalog.value)
+
+async function browse(page = 1) {
+  catalogLoading.value = true
+  catalogError.value = ''
+  try {
+    catalog.value = await api.goods({ page, size: 12, sort: sort.value, category_id: category.value })
+  } catch (e) {
+    catalogError.value = e instanceof ApiError ? e.message : '商品列表加载失败'
+    catalog.value = null
+  } finally {
+    catalogLoading.value = false
+  }
+}
+
+async function loadCategories() {
+  try {
+    categories.value = await api.categories()
+  } catch {
+    // 分类加载失败时仍可浏览全部商品和使用搜索。
+  }
+}
 
 async function run() {
   const term = q.value.trim()
-  if (!term) return
+  if (!term || loading.value) return
   loading.value = true
   error.value = ''
   try {
@@ -25,46 +53,72 @@ async function run() {
   }
 }
 
+function clearSearch() {
+  q.value = ''
+  result.value = null
+  error.value = ''
+}
+
+browse()
+loadCategories()
 </script>
 
 <template>
   <section class="card">
-    <h2 style="margin: 0 0 4px">商品搜索</h2>
+    <h2 style="margin: 0 0 4px">逛商城</h2>
     <p class="muted" style="margin: 0 0 16px">
-      支持完整型号、商品关键词和自然语言需求搜索
+      按分类浏览，或搜索商品名称和完整型号
     </p>
 
     <div class="row">
       <input
         v-model="q"
-        placeholder="试试「Mate60Pro」「降噪耳机」「拍照清晰的手机」"
-        style="flex: 1; min-width: 240px"
+        aria-label="搜索商品"
+        placeholder="例如 Mate60Pro、降噪耳机"
+        style="flex: 1; min-width: min(240px, 100%)"
         @keyup.enter="run"
       />
       <button class="primary" :disabled="loading || !q.trim()" @click="run">
         {{ loading ? '搜索中…' : '搜索' }}
       </button>
+      <button v-if="result || error" class="ghost" :disabled="loading" @click="clearSearch">清除搜索</button>
       <label class="switch">
         <input v-model="semantic" type="checkbox" />
-        语义检索
+        按需求搜索
       </label>
     </div>
     <p v-if="error" class="err">{{ error }}</p>
   </section>
 
-  <section v-if="result" class="card" style="margin-top: 16px">
-    <div class="dbg">
-      <span class="muted">分词结果</span>
-      <code>{{ result.segmented || '（空）' }}</code>
-      <span class="muted" style="margin-left: auto">命中 {{ result.total }} 条</span>
+  <section class="card" style="margin-top: 16px">
+    <div v-if="!result" class="row browse-controls">
+      <label>分类
+        <select v-model="category" :disabled="catalogLoading" @change="browse()">
+          <option :value="null">全部分类</option>
+          <option v-for="item in categories" :key="item.id" :value="item.id">{{ item.name }}</option>
+        </select>
+      </label>
+      <label>排序
+        <select v-model="sort" :disabled="catalogLoading" @change="browse()">
+          <option value="default">默认排序</option>
+          <option value="newest">最新上架</option>
+          <option value="price_asc">价格从低到高</option>
+          <option value="price_desc">价格从高到低</option>
+        </select>
+      </label>
+      <span v-if="catalog" class="muted">共 {{ catalog.total }} 件商品</span>
     </div>
+    <p v-else class="muted">找到 {{ result.total }} 件商品</p>
 
-    <p v-if="!result.items.length" class="muted" style="padding: 24px 0; text-align: center">
-      没有找到相关商品。关掉「语义检索」再试一次可以对比出是哪一路在起作用。
-    </p>
+    <p v-if="!result && catalogLoading" class="muted" role="status">商品加载中…</p>
+    <div v-else-if="!result && catalogError" class="row" role="alert">
+      <span class="err">{{ catalogError }}</span>
+      <button class="ghost" @click="browse()">重试</button>
+    </div>
+    <p v-else-if="!visible?.items.length" class="muted">暂无符合条件的商品。</p>
 
-    <ul class="list">
-      <li v-for="it in result.items" :key="it.id">
+    <ul v-else class="list">
+      <li v-for="it in visible.items" :key="it.id">
         <RouterLink :to="`/goods/${it.id}`" class="thumblink">
           <img v-if="it.header_pic" :src="it.header_pic" :alt="it.goods_name" class="thumb" />
           <div v-else class="thumb">{{ it.goods_name.slice(0, 2) }}</div>
@@ -76,17 +130,20 @@ async function run() {
           </div>
           <div class="cap muted">{{ it.caption }}</div>
           <div v-if="it.model_name" class="cap muted">型号：{{ it.model_name }}</div>
-          <div class="tags">
-            <span v-for="s in it.matched_by" :key="s" class="tag" :class="s">{{ s === 'model_exact' ? '型号精确匹配' : s }}</span>
-          </div>
+          <span v-if="it.matched_by?.includes('model_exact')" class="tag">型号精确匹配</span>
         </div>
         <div class="right">
           <div class="price">¥{{ it.price }}</div>
-          <div class="muted small">库存 {{ it.stock }}</div>
+          <div class="muted small">{{ it.stock > 0 ? '有货' : '缺货' }}</div>
           <button class="ghost" @click="router.push(`/goods/${it.id}`)">详情</button>
         </div>
       </li>
     </ul>
+    <div v-if="!result && catalog && catalog.total > catalog.size" class="row pagination">
+      <button class="ghost" :disabled="catalogLoading || catalog.page <= 1" @click="browse(catalog.page - 1)">上一页</button>
+      <span>第 {{ catalog.page }} / {{ Math.ceil(catalog.total / catalog.size) }} 页</span>
+      <button class="ghost" :disabled="catalogLoading || catalog.page * catalog.size >= catalog.total" @click="browse(catalog.page + 1)">下一页</button>
+    </div>
 
   </section>
 </template>
@@ -105,21 +162,8 @@ async function run() {
   color: var(--muted);
   user-select: none;
 }
-.dbg {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: #f8fafc;
-  border: 1px dashed var(--line);
-  border-radius: 8px;
-  padding: 8px 12px;
-  margin-bottom: 14px;
-  font-size: 13px;
-}
-.dbg code {
-  color: #0f172a;
-  word-break: break-all;
-}
+.browse-controls { margin-bottom: 12px; }
+.pagination { justify-content: center; margin-top: 12px; }
 .list {
   list-style: none;
   margin: 0;
@@ -181,11 +225,5 @@ async function run() {
 }
 .small {
   font-size: 12px;
-}.intro {
-  color: var(--muted);
-  font-size: 13px;
-  background: #f8fafc;
-  padding: 10px 12px;
-  border-radius: 8px;
 }
 </style>

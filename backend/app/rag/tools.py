@@ -191,6 +191,8 @@ def build_tools(user_id: int | None) -> list:
         ]
         if order.close_reason:
             lines.append(f"关闭原因：{order.close_reason}")
+        if order.tracking_no:
+            lines.append(f"承运商：{order.carrier}｜物流单号：{order.tracking_no}")
         return "\n".join(lines), {"refs": [{"type": "order", "id": order.id, "order_no": order.order_no}]}
 
     return [search_goods, get_goods_detail, search_faq, list_my_orders, get_order_detail]

@@ -37,6 +37,12 @@ async def get_current_user(
     return user
 
 
+async def require_fulfillment_staff(user: User = Depends(get_current_user)) -> User:
+    if not user.can_ship_orders:
+        raise BusException(CodeEnum.FORBIDDEN, "当前账号没有发货权限")
+    return user
+
+
 async def get_optional_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     db: AsyncSession = Depends(get_db),

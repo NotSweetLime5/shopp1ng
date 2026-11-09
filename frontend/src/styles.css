@@ -46,6 +46,7 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
+  white-space: nowrap;
 }
 .brand small {
   font-weight: 400;
@@ -87,6 +88,22 @@ button {
   color: var(--brand);
   text-decoration: none;
   font-weight: 600;
+}
+
+@media (max-width: 740px) {
+  .bar {
+    height: auto;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 6px 12px;
+    padding: 8px 12px;
+  }
+  .bar nav {
+    order: 1;
+    flex-basis: 100%;
+    overflow-x: auto;
+  }
+  .bar nav a { padding: 5px 10px; }
 }
 
 .page {

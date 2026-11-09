@@ -13,6 +13,7 @@ const error = ref('')
 const notice = ref('')
 const placing = ref(false)
 const showAddr = ref(false)
+let pendingCheckout = null
 
 const form = reactive({
   contact: '',
@@ -122,12 +123,13 @@ async function saveAddress() {
 
 // Idempotency-Key 自己拼，不用 crypto.randomUUID()：
 // 那个 API 只在安全上下文（https 或 localhost）里存在，用局域网 IP 打开页面就是 undefined，
-// 表现是"换台机器点提交订单毫无反应"。这里要的只是"同一次点击唯一"，不是抗猜测。
+// 表现是"换台机器点提交订单毫无反应"。键只用来标识一次结算。
 function submitKey() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
 async function checkout() {
+  if (placing.value) return
   notice.value = ''
   error.value = ''
   if (!picked.value.length) {
@@ -139,14 +141,20 @@ async function checkout() {
     showAddr.value = true
     return
   }
+  const lines = picked.value.map((i) => [i.id, i.quantity]).sort(([a], [b]) => a - b)
+  const addressId = addrId.value
+  const signature = JSON.stringify([addressId, lines])
+  // 响应丢失时，原样重试可以取回已经提交的订单；修改选择后开始新的结算。
+  if (pendingCheckout?.signature !== signature) {
+    pendingCheckout = { signature, key: submitKey() }
+  }
   placing.value = true
   try {
-    // 每次点击生成一个新的 Idempotency-Key：它是"这一下提交"的身份，
-    // 不是"这个购物车"的身份。连点保护靠的是 placing 标志位。
     const order = await api.createOrder(
-      { cart_item_ids: picked.value.map((i) => i.id), address_id: addrId.value },
-      submitKey(),
+      { cart_item_ids: lines.map(([id]) => id), address_id: addressId },
+      pendingCheckout.key,
     )
+    pendingCheckout = null
     router.push({ path: '/orders', query: { created: order.order_no } })
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : '下单失败'

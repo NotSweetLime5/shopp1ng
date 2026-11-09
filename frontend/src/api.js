@@ -124,6 +124,8 @@ export const api = {
 
   // 商品与检索
   search: (q, opts = {}) => http('/search', { params: { q, ...opts } }),
+  goods: (params) => http('/goods', { params }),
+  categories: () => http('/categories/tree'),
   goodsDetail: (id) => http(`/goods/${id}`),
 
   // 购物车。四个写接口都返回"改动后的整张购物车"，所以调用方不用再拉一次
@@ -142,9 +144,12 @@ export const api = {
   orders: (status) => http('/orders', { params: status ? { status } : {} }),
   orderDetail: (id) => http(`/orders/${id}`),
   createOrder: (body, idemKey) =>
-    http('/orders', { method: 'POST', body, headers: idemKey }),
+    http('/orders', { method: 'POST', body, headers: idemKey ? { 'Idempotency-Key': idemKey } : undefined }),
   payOrder: (id) => http(`/orders/${id}/pay`, { method: 'POST' }),
   cancelOrder: (id) => http(`/orders/${id}/cancel`, { method: 'POST' }),
+  confirmReceipt: (id) => http(`/orders/${id}/confirm-receipt`, { method: 'POST' }),
+  pendingShipments: (page) => http('/fulfillment/orders', { params: { page } }),
+  shipOrder: (id, body) => http(`/fulfillment/orders/${id}/ship`, { method: 'POST', body }),
 
   // 客服
   chatHistory: (sessionId, guestSecret) =>

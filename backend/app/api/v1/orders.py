@@ -3,13 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.database import get_db
-from app.core.exceptions import BusException
-from app.core.redis_ops import (
-    acquire_idempotency,
-    release_idempotency,
-    save_idempotent_result,
-)
-from app.core.result import BaseResult, CodeEnum
+from app.core.result import BaseResult
 from app.models.user import User
 from app.schemas.order import OrderCreate, OrderDetailOut, OrderItemOut, OrderOut
 from app.services import order_service
@@ -23,40 +17,19 @@ async def create_order(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     idempotency_key: str | None = Header(
-        None, alias="Idempotency-Key", max_length=64, description="客户端生成的 UUID，防重复下单"
+        None, alias="Idempotency-Key", max_length=64, description="客户端生成的结算标识，重试时复用"
     ),
 ):
-    if not idempotency_key:
-        order = await order_service.create_order(db, user, data)
-        return BaseResult.ok(await _detail(db, user.id, order.id))
+    if idempotency_key:
+        order_id = await order_service.find_order_for_retry(db, user.id, idempotency_key)
+        if order_id is not None:
+            return BaseResult.ok(await _detail(db, user.id, order_id), "订单已创建，返回已有订单")
 
-    state = await acquire_idempotency("order", idempotency_key, user.id)
-    if state != "NEW":
-        return await _replay(db, user.id, idempotency_key, state)
-
-    try:
-        order = await order_service.create_order(db, user, data)
-    except Exception:
-        # 业务失败必须清掉占位，否则用户改对了参数也永远提交不上来
-        await release_idempotency("order", idempotency_key, user.id)
-        raise
-
-    await save_idempotent_result("order", idempotency_key, user.id, str(order.id))
-    return BaseResult.ok(await _detail(db, user.id, order.id))
-
-
-async def _replay(db: AsyncSession, user_id: int, key: str, state: str):
-    if state == "PROCESSING":
-        raise BusException(CodeEnum.CONFLICT, "订单正在处理中，请勿重复提交")
-    try:
-        detail = await _detail(db, user_id, int(state))
-    except BusException:
-        # Redis 里记着订单 id，库里却没有 —— 说明那次请求最终没提交成功
-        # （commit 在接口返回之后才发生）。清掉占位让用户能重试，
-        # 而不是返回一个指向空气的订单号。
-        await release_idempotency("order", key, user_id)
-        raise BusException(CodeEnum.CONFLICT, "上次下单未成功，请重新提交") from None
-    return BaseResult.ok(detail, "订单已创建，返回首次结果")
+    order = await order_service.create_order(db, user, data, idempotency_key=idempotency_key or None)
+    detail = await _detail(db, user.id, order.id)
+    # 订单、幂等键、库存与购物车一起提交。确认提交成功后再发成功响应。
+    await db.commit()
+    return BaseResult.ok(detail)
 
 
 @router.get("", response_model=BaseResult[list[OrderOut]])
@@ -100,6 +73,17 @@ async def cancel_order(
 ):
     order = await order_service.cancel_order(db, user.id, order_id)
     return BaseResult.ok(OrderOut.model_validate(order), "订单已取消")
+
+
+@router.post("/{order_id}/confirm-receipt", response_model=BaseResult[OrderOut])
+async def confirm_receipt(
+    order_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    order = OrderOut.model_validate(await order_service.confirm_receipt(db, user.id, order_id))
+    await db.commit()
+    return BaseResult.ok(order)
 
 
 async def _detail(db: AsyncSession, user_id: int, order_id: int) -> OrderDetailOut:

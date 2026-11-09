@@ -26,6 +26,7 @@ class UserOut(BaseModel):
     nick_name: str | None
     head_pic: str | None
     is_active: bool
+    can_ship_orders: bool = False
 
 
 class TokenOut(BaseModel):
